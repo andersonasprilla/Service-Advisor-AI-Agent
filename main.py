@@ -18,16 +18,11 @@ pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 pinecone_index = pc.Index("honda-agent")
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
-# --- MEMORY STORAGE (The "Guest List") ---
-# Stores the car model for each phone number
+# --- MEMORY STORAGE ---
 user_sessions = {}
 
-# --- THE ROUTER ---
+# --- 1. THE ROUTER (Identifies Car) ---
 def identify_vehicle(user_text: str):
-    """
-    Determines if the user MENTIONED a car in this specific message.
-    Updates: Matches the specific namespaces in your Pinecone screenshot.
-    """
     system_prompt = """
     You are a router for a Honda AI. 
     Analyze the user's question and identify if they explicitly mention a car model.
@@ -39,23 +34,40 @@ def identify_vehicle(user_text: str):
     
     Return ONLY the string.
     """
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{text}")
-    ])
-    
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{text}")])
     chain = prompt | llm | StrOutputParser()
-    result = chain.invoke({"text": user_text})
-    return result.strip().lower()
+    return chain.invoke({"text": user_text}).strip().lower()
 
-# --- THE SEARCH ---
+# --- 2. THE GUARD (New: Checks for Anger/Human Request) ---
+def check_for_escalation(user_text: str):
+    """
+    Checks if the user is angry or asking for a human.
+    Returns 'YES' if we need to hand off, 'NO' if we can handle it.
+    """
+    system_prompt = """
+    You are a customer service supervisor. Analyze the user's incoming text.
+    
+    Return "YES" if:
+    1. The user is expressing anger or frustration (swearing, shouting).
+    2. The user explicitly asks for a "human", "person", "agent", or "manager".
+    
+    Return "NO" if:
+    1. It is a normal technical question (even if short).
+    2. They are just saying hello or giving car info.
+    
+    Return ONLY "YES" or "NO".
+    """
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{text}")])
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({"text": user_text}).strip()
+    return result
+
+# --- 3. THE SEARCH (RAG) ---
 def get_answer_from_manual(question: str, namespace: str):
     print(f"🔎 Searching in drawer: [{namespace}] for: {question}")
     
     query_vector = embeddings.embed_query(question)
     
-    # UPGRADE 1: Increase top_k to 15 to find pages deep in the section
     search_results = pinecone_index.query(
         vector=query_vector,
         top_k=15, 
@@ -65,17 +77,14 @@ def get_answer_from_manual(question: str, namespace: str):
     
     context_text = ""
     for match in search_results['matches']:
-        # UPGRADE 2: Print the page numbers it found (X-Ray Vision)
-        page_num = match['metadata'].get('page', 'Unknown')
-        print(f"   - Found info on Page {page_num}")
-        
         context_text += match['metadata']['text'] + "\n---\n"
         
+    # We update the prompt to allow the AI to admit defeat cleanly
     prompt_template = ChatPromptTemplate.from_template("""
     You are a helpful Honda Service Advisor Assistant.
     Answer the customer's question ONLY based on the following manual context.
-    If the answer is not in the context, say "I'm sorry, I couldn't find that in the manual."
-    Keep the answer friendly but concise (suitable for SMS).
+    
+    If the answer is NOT in the context, reply exactly with: "NO_ANSWER_FOUND"
     
     Context from Manual:
     {context}
@@ -94,43 +103,42 @@ def get_answer_from_manual(question: str, namespace: str):
 
 @app.get("/")
 async def health_check():
-    return {"message": "Honda Memory Agent is awake!"}
+    return {"message": "Honda Agent with Escalation is awake!"}
 
 @app.post("/sms")
 async def reply_to_sms(Body: str = Form(...), From: str = Form(...)):
     print(f"📩 Received from {From}: {Body}")
-    
-    # 1. Check if the user explicitly named a car in this message
+    resp = MessagingResponse()
+
+    # --- STEP A: Check if user is angry or wants a human ---
+    is_escalation = check_for_escalation(Body)
+    if is_escalation == "YES":
+        print("🚨 SENTIMENT ALERT: User is angry or asking for human.")
+        resp.message("I understand you'd like to speak with someone. I have flagged this conversation for Anderson (Senior Advisor). He will text you personally in a moment.")
+        # In a real app, you would send an email/text to YOURSELF here.
+        return str(resp)
+
+    # --- STEP B: Vehicle Logic ---
     detected_car = identify_vehicle(Body)
-    
-    # 2. Logic: Determine which car to use
     target_car = None
     
     if detected_car != "unknown":
-        # Case A: User said the car name (e.g., "My Ridgeline...")
         target_car = detected_car
-        # Save it to memory!
         user_sessions[From] = target_car
-        print(f"💾 Saved new car for {From}: {target_car}")
-        
-    else:
-        # Case B: User didn't say a name, check memory
-        if From in user_sessions:
-            target_car = user_sessions[From]
-            print(f"🧠 Remembered car for {From}: {target_car}")
-        else:
-            target_car = None
+    elif From in user_sessions:
+        target_car = user_sessions[From]
 
-    resp = MessagingResponse()
-
-    # 3. Action
     if target_car:
-        # We have a car -> Answer the question
+        # --- STEP C: Get Answer ---
         ai_answer = get_answer_from_manual(Body, target_car)
-        resp.message(ai_answer)
+        
+        # --- STEP D: Check for AI Failure ---
+        if "NO_ANSWER_FOUND" in ai_answer:
+            print("❌ RAG FAILURE: Manual didn't have the answer.")
+            resp.message("I checked the 2025 manual, but I couldn't find that specific detail. I've notified a human Service Advisor to check the shop system for you.")
+        else:
+            resp.message(ai_answer)
     else:
-        # We still don't know the car -> Ask the user
-        print("🤷 Unknown car. Asking user.")
         resp.message("I can help with that! Which vehicle is this for? (Passport, Civic, or Ridgeline?)")
     
     return str(resp)
