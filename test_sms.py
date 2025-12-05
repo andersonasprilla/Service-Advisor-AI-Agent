@@ -5,7 +5,7 @@ url = "http://127.0.0.1:8000/sms"
 
 # This simulates the data Twilio would send
 payload = {
-    "Body": "How do I fly the Ridgeline to the moon?",
+    "Body": "How much oil does the Ridgeline take?",
     "From": "+15550001234"
 }
 

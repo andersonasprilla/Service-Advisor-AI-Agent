@@ -1,10 +1,11 @@
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Response 
 from twilio.twiml.messaging_response import MessagingResponse
 
 from pinecone import Pinecone
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -12,16 +13,29 @@ load_dotenv()
 
 app = FastAPI()
 
-# --- SETUP ---
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-pinecone_index = pc.Index("honda-agent")
-llm = ChatOpenAI(model="gpt-4o", temperature=0)
-
 # --- MEMORY STORAGE ---
 user_sessions = {}
+# --- AUTHENTICATION ---
+allowed_users = ["+15550001234", "+13475108412"]
+SHOP_PASSWORD = "HONDA2025"
 
-# --- 1. THE ROUTER (Identifies Car) ---
+# --- SETUP ---
+# 1. EMBEDDINGS (Keep OpenAI to avoid re-indexing Pinecone)
+# Cost: Very cheap (~$0.00002/query). Worth keeping for accuracy.
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# 2. VECTOR DB (Pinecone)
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+pinecone_index = pc.Index("honda-agent")
+
+# --- THE BRAIN (Swapped back to OpenAI for Speed) ---
+# Cost: Cheap (~$0.01 for 50 messages)
+from langchain_openai import ChatOpenAI
+
+# Use gpt-4o-mini because it is the fastest model they have
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+# --- 1. THE ROUTER ---
 def identify_vehicle(user_text: str):
     system_prompt = """
     You are a router for a Honda AI. 
@@ -38,11 +52,10 @@ def identify_vehicle(user_text: str):
     chain = prompt | llm | StrOutputParser()
     return chain.invoke({"text": user_text}).strip().lower()
 
-# --- 2. THE GUARD (New: Checks for Anger/Human Request) ---
+# --- 2. THE GUARD ---
 def check_for_escalation(user_text: str):
     """
     Checks if the user is angry or asking for a human.
-    Returns 'YES' if we need to hand off, 'NO' if we can handle it.
     """
     system_prompt = """
     You are a customer service supervisor. Analyze the user's incoming text.
@@ -52,15 +65,14 @@ def check_for_escalation(user_text: str):
     2. The user explicitly asks for a "human", "person", "agent", or "manager".
     
     Return "NO" if:
-    1. It is a normal technical question (even if short).
+    1. It is a normal technical question.
     2. They are just saying hello or giving car info.
     
     Return ONLY "YES" or "NO".
     """
     prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{text}")])
     chain = prompt | llm | StrOutputParser()
-    result = chain.invoke({"text": user_text}).strip()
-    return result
+    return chain.invoke({"text": user_text}).strip()
 
 # --- 3. THE SEARCH (RAG) ---
 def get_answer_from_manual(question: str, namespace: str):
@@ -79,7 +91,6 @@ def get_answer_from_manual(question: str, namespace: str):
     for match in search_results['matches']:
         context_text += match['metadata']['text'] + "\n---\n"
         
-    # We update the prompt to allow the AI to admit defeat cleanly
     prompt_template = ChatPromptTemplate.from_template("""
     You are a helpful Honda Service Advisor Assistant.
     Answer the customer's question ONLY based on the following manual context.
@@ -101,44 +112,49 @@ def get_answer_from_manual(question: str, namespace: str):
     
     return response.content
 
-@app.get("/")
-async def health_check():
-    return {"message": "Honda Agent with Escalation is awake!"}
-
 @app.post("/sms")
 async def reply_to_sms(Body: str = Form(...), From: str = Form(...)):
-    print(f"📩 Received from {From}: {Body}")
+    # 1. CLEAN THE NUMBER
+    clean_phone = From.replace("whatsapp:", "")
+    print(f"📩 Received from {clean_phone}: {Body}")
+    
     resp = MessagingResponse()
 
-    # --- STEP A: Check if user is angry or wants a human ---
-    is_escalation = check_for_escalation(Body)
-    if is_escalation == "YES":
-        print("🚨 SENTIMENT ALERT: User is angry or asking for human.")
-        resp.message("I understand you'd like to speak with someone. I have flagged this conversation for Anderson (Senior Advisor). He will text you personally in a moment.")
-        # In a real app, you would send an email/text to YOURSELF here.
-        return str(resp)
+    # 2. AUTH CHECK
+    # We added your number to 'allowed_users' so this should pass now.
+    if clean_phone not in allowed_users:
+        if Body.strip().upper() == SHOP_PASSWORD:
+            allowed_users.append(clean_phone)
+            resp.message("✅ Access Granted! Welcome to the Team.")
+        else:
+            resp.message("🔒 Access Denied. Text the Shop Code (HONDA2025).")
+        
+        # FIX: Explicitly tell Twilio this is XML
+        return Response(content=str(resp), media_type="application/xml")
 
-    # --- STEP B: Vehicle Logic ---
+    # 3. LOGIC (Guard, Router, RAG)
+    is_escalation = check_for_escalation(Body)
+    if "YES" in is_escalation:
+        resp.message("I understand. I have flagged this for Anderson.")
+        return Response(content=str(resp), media_type="application/xml")
+
     detected_car = identify_vehicle(Body)
     target_car = None
     
-    if detected_car != "unknown":
+    if "unknown" not in detected_car:
         target_car = detected_car
         user_sessions[From] = target_car
     elif From in user_sessions:
         target_car = user_sessions[From]
 
     if target_car:
-        # --- STEP C: Get Answer ---
         ai_answer = get_answer_from_manual(Body, target_car)
-        
-        # --- STEP D: Check for AI Failure ---
         if "NO_ANSWER_FOUND" in ai_answer:
-            print("❌ RAG FAILURE: Manual didn't have the answer.")
-            resp.message("I checked the 2025 manual, but I couldn't find that specific detail. I've notified a human Service Advisor to check the shop system for you.")
+            resp.message("I checked the manual, but I couldn't find that specific detail.")
         else:
             resp.message(ai_answer)
     else:
-        resp.message("I can help with that! Which vehicle is this for? (Passport, Civic, or Ridgeline?)")
+        resp.message("I can help! Which vehicle is this for? (Passport, Civic, or Ridgeline?)")
     
-    return str(resp)
+    # FIX: Explicitly tell Twilio this is XML
+    return Response(content=str(resp), media_type="application/xml")
