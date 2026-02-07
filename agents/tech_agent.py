@@ -50,7 +50,19 @@ Guidelines:
         )
 
         if not results["matches"]:
-            return "No relevant information found in the manual."
+            return "No relevant information found."
+        
+        # Check the score of the VERY BEST match
+        top_score = results["matches"][0]["score"]
+        print(f"      📊 Top Match Score: {top_score:.4f}") 
+        
+        # NEW THRESHOLD: 0.50 (Since your valid matches are ~0.60)
+        if top_score < 0.50:
+            print(f"      ⛔ Score {top_score:.4f} is too low. Blocking LLM.")
+            return "NO_ANSWER_FOUND"  # <--- CRITICAL: Make sure this line exists!
+
+        # OPTIONAL: Print the text of the match to verify it's actually relevant
+        print(f"      📄 Matched Text Preview: {results['matches'][0]['metadata']['text'][:100]}...")
 
         # Extract text chunks
         chunks = [

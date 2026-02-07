@@ -147,6 +147,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "I can look up stuff from your owner's manual or help you schedule a service visit."
         )
         return
+    
+    # OFF TOPIC
+    if intent == "off_topic":
+        await update.message.reply_text(
+            "I'm just a car bot — I can't really help with that! 😅 "
+            "But if you have questions about your Honda, let me know."
+        )
+        return
 
     # TECH — the default path
     if vehicle:
@@ -206,8 +214,8 @@ async def start_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True,
     )
     await update.message.reply_text(
-        "Let's get you scheduled! "
-        "Can you share your phone number? You can tap the button below or just type it in.",
+        "You got it. 🔧 First things first — what's your cell number? "
+        "I'll see if I can pull up your file.",
         reply_markup=keyboard,
     )
     return ASKING_PHONE
@@ -262,7 +270,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["_state"] = "CONFIRM_IDENTITY"
 
     await update.message.reply_text(
-        "Got it! I don't think we've met — what's your name?",
+        "Thanks. I don't see that number in the system yet, so we'll start fresh. Who am I speaking with?",
         reply_markup=ReplyKeyboardRemove(),
     )
     return CONFIRM_IDENTITY
@@ -296,7 +304,7 @@ async def get_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["_state"] = "ASKING_SERVICE"
 
     await update.message.reply_text(
-        "Got it. What do you need done? Oil change, brakes, check engine light, recall — just let me know."
+        "Solid. What are we bringing it in for?"
     )
     return ASKING_SERVICE
 

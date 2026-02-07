@@ -42,6 +42,7 @@ INTENT RULES:
 - "escalation": Customer is angry, frustrated, swearing, or explicitly asking for a human/manager/person.
 - "greeting": Customer is just saying hello, thanks, or making small talk.
 - "vehicle_select": Customer's message is ONLY a vehicle name (e.g., just "Civic" or "Passport" by itself) — they're selecting which car to talk about.
+- "off_topic": Questions clearly unrelated to cars, service, or the dealership (e.g., cooking, jokes, coding, weather, politics).
 
 VEHICLE RULES:
 - Set vehicle to the namespace string if they mention a specific Honda model.
@@ -168,7 +169,7 @@ class OrchestratorAgent:
 
     def _validate(self, result: dict) -> dict:
         """Ensure the LLM response has all required fields with valid values."""
-        valid_intents = {"tech", "booking", "escalation", "greeting", "vehicle_select"}
+        valid_intents = {"tech", "booking", "escalation", "greeting", "vehicle_select", "off_topic"}
         valid_vehicles = set(VEHICLE_NAMESPACES.values()) | {None}
 
         result.setdefault("intent", "tech")
