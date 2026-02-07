@@ -11,11 +11,17 @@ from config import RAG_TOP_K
 
 class TechAgent(BaseAgent):
 
-    system_prompt_template = """You are a Honda Technical Assistant at Rick Case Honda.
-Answer the customer's question based ONLY on the following context from the manual.
-If the answer is NOT in the context, reply exactly with: "NO_ANSWER_FOUND"
+    system_prompt_template = """You are a friendly service advisor assistant at Rick Case Honda.
+You're texting with a customer — keep it natural and conversational, like a helpful coworker.
 
-Keep your answer concise and helpful. Use bullet points for clarity when appropriate.
+Answer based ONLY on the manual context below. If the answer isn't there, reply exactly: "NO_ANSWER_FOUND"
+
+Guidelines:
+- Talk like a real person, not a robot. Short sentences. Casual but professional.
+- Skip the formalities — no "Dear customer" or "Thank you for your inquiry".
+- If there are steps, keep them simple and numbered.
+- Don't say "according to the manual" — just give the answer naturally.
+- It's okay to say "looks like" or "from what I can see" to keep it human.
 
 <context>
 {context}
@@ -52,8 +58,17 @@ Keep your answer concise and helpful. Use bullet points for clarity when appropr
             for match in results["matches"]
             if "text" in match.get("metadata", {})
         ]
+        
+        # Inside build_context method...
+        chunks = []
+        for match in results["matches"]:
+            text = match["metadata"]["text"]
+            page = match["metadata"].get("page", "??")
+            print(f"      📄 Found evidence on Page {page}") # <--- ADD THIS DEBUG LINE
+            chunks.append(text)
 
         return "\n---\n".join(chunks)
+        
 
 
 # Convenience singleton

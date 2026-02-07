@@ -1,15 +1,15 @@
 """
 Rick Case Honda AI Bot — Telegram Entry Point
 
-This file only handles:
-  - Telegram handlers (start, help, messages)
-  - Appointment conversation flow (state machine)
-  - Delegating to agents for actual logic
+Message flow:
+  1. Auth check
+  2. Appointment state machine (if mid-flow)
+  3. Orchestrator classifies message in ONE call → {intent, vehicle, escalation}
+  4. Dispatch to the right agent/handler
 
 All business logic lives in agents/ and services/.
 """
 
-import os
 import re
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
@@ -20,7 +20,7 @@ from telegram.ext import (
     filters, ContextTypes, ConversationHandler,
 )
 
-from config import TELEGRAM_BOT_TOKEN, SHOP_PASSWORD, ADVISOR_TELEGRAM_ID, VEHICLE_NAMESPACES
+from config import TELEGRAM_BOT_TOKEN, SHOP_PASSWORD, ADVISOR_TELEGRAM_ID
 from utils.data_setup import setup_data_folder
 from services.customer_database import customer_db
 from services.appointments import save_appointment, notify_advisor
@@ -34,7 +34,7 @@ CONFIRM_IDENTITY, ASKING_PHONE, ASKING_VEHICLE, ASKING_SERVICE, ASKING_DATE, ASK
 
 # ─── In-Memory State ─────────────────────────────────────────────
 allowed_users = []          # Authenticated Telegram user IDs
-user_sessions = {}          # vehicle context per user (for tech questions)
+user_sessions = {}          # vehicle namespace per user (for follow-up tech questions)
 appointment_data = {}       # partial appointment info during booking
 
 
@@ -47,37 +47,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_scan = len(context.args) > 0 and context.args[0] == "scan"
 
-    greeting = (
-        "Hi! This is Anderson's AI assistant. How can I help you? 🚗"
-        if is_scan
-        else "👋 Welcome to Rick Case Honda Service AI!"
-    )
+    if is_scan:
+        greeting = "Hey! 👋 I'm Anderson's assistant over at Rick Case Honda."
+    else:
+        greeting = "Hey there! 👋 Welcome to Rick Case Honda."
 
     if user_id not in allowed_users:
-        await update.message.reply_text(f"{greeting}\n\n🔐 To get started, please send the shop password.")
+        await update.message.reply_text(
+            f"{greeting}\n\n"
+            "Quick thing — what's the shop code? Just need it to pull up our system for you."
+        )
     else:
         await update.message.reply_text(
-            f"{greeting}\n\n💬 Ask me any Honda questions or type 'book appointment' to schedule service!"
+            f"{greeting}\n\n"
+            "Good to see you again! What's going on with your car today?"
         )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /help command."""
     await update.message.reply_text(
-        "🚗 Rick Case Honda Service AI\n\n"
-        "I can help you with:\n\n"
-        "📚 Technical Questions:\n"
-        "• 2025 Honda Civic\n"
-        "• 2025 Honda Ridgeline\n"
-        "• 2026 Honda Passport\n\n"
-        "📅 Quick Appointment Scheduling:\n"
-        "• Say 'book appointment' or 'schedule service'\n"
-        "• If you're a returning customer, I'll recognize you!\n\n"
-        "💡 Tips:\n"
-        "• Just mention your car model in your question\n"
-        "• Example: 'What's the oil capacity for my Civic?'\n"
-        "• I'll remember which car you're asking about!\n\n"
-        "Just ask me anything!"
+        "Here's what I can help with:\n\n"
+        "Got a question about your Civic, Ridgeline, or Passport? "
+        "Just ask me — I've got the owner's manuals right here.\n\n"
+        "Need to come in for service? Just say something like "
+        "\"I need an oil change\" or \"can I schedule something for next week\" "
+        "and I'll get you set up.\n\n"
+        "If you've been here before, I'll probably recognize your number "
+        "so we can skip the back-and-forth. 👍"
     )
 
 
@@ -86,7 +83,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes all incoming text messages."""
+    """Routes all incoming text messages through the Orchestrator."""
     user_id = update.effective_user.id
     user_text = update.message.text
 
@@ -95,81 +92,81 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADVISOR_TELEGRAM_ID:
         print(f"💡 TIP: Set ADVISOR_TELEGRAM_ID={user_id} in .env to receive notifications!")
 
-    # ── Check if mid-appointment flow ──
+    # ── 1. Check if mid-appointment flow (skip orchestrator) ──
     if user_id in appointment_data and "_state" in appointment_data[user_id]:
         return await _route_appointment_state(update, context)
 
-    # ── Auth check ──
+    # ── 2. Auth check (skip orchestrator) ──
     if user_id not in allowed_users:
         if user_text.strip().upper() == SHOP_PASSWORD:
             allowed_users.append(user_id)
             await update.message.reply_text(
-                "✅ Access Granted! Welcome to Rick Case Honda!\n\n"
-                "I'm ready to help. What's on your mind? (Civic, Passport, or Ridgeline)"
+                "You're all set! 👍\n\n"
+                "What's going on with your car today?"
             )
         else:
             await update.message.reply_text(
-                "I'd love to help you with that! 🛠️\n\n"
-                "Please send the **shop password** first so I can access our manuals "
-                "and booking system for you."
+                "I'd love to help! Just need the shop code first so I can pull everything up for you."
             )
         return
 
-    # ── Appointment intent ──
-    if router.detect_appointment_intent(user_text):
+    # ── 3. Orchestrator: ONE call to classify everything ──
+    decision = orchestrator.classify(user_text)
+    intent = decision["intent"]
+    vehicle = decision["vehicle"]
+
+    print(f"🎯 Orchestrator: intent={intent} | vehicle={vehicle} | summary={decision['summary']}")
+
+    # ── 4. Dispatch based on intent ──
+
+    # ESCALATION
+    if intent == "escalation":
+        await update.message.reply_text(
+            "I hear you — let me get a real person on this. "
+            "I've flagged it for one of our advisors and someone will reach out to you shortly."
+        )
+        return
+
+    # BOOKING
+    if intent == "booking":
         return await start_appointment(update, context)
 
-    # ── Escalation guard ──
-    if router.check_for_escalation(user_text):
+    # VEHICLE SELECT
+    if intent == "vehicle_select" and vehicle:
+        user_sessions[user_id] = vehicle
+        vehicle_name = vehicle.split("-")[0].title()
         await update.message.reply_text(
-            "I understand. I have flagged this for a service advisor. "
-            "Someone will reach out shortly. Is there anything else I can help with?"
+            f"{vehicle_name}, got it! What do you need to know?"
         )
         return
 
-    # ── Vehicle detection + RAG ──
-    detected_car = router.identify_vehicle(user_text)
-    target_car = None
-
-    print(f"🔍 Detected vehicle: {detected_car}")
-
-    # Direct vehicle selection (user just says "Civic")
-    user_lower = user_text.strip().lower()
-    if user_lower in VEHICLE_NAMESPACES:
-        target_car = VEHICLE_NAMESPACES[user_lower]
-        user_sessions[user_id] = target_car
+    # GREETING
+    if intent == "greeting":
         await update.message.reply_text(
-            f"✅ Got it! I'll help you with your {user_lower.title()}.\n\nWhat would you like to know?"
+            "Hey! 👋 What can I help you with today? "
+            "I can look up stuff from your owner's manual or help you schedule a service visit."
         )
         return
 
-    # Use detected or session vehicle
-    if detected_car != "unknown":
-        target_car = detected_car
-        user_sessions[user_id] = target_car
-    elif user_id in user_sessions:
-        target_car = user_sessions[user_id]
+    # TECH — the default path
+    if vehicle:
+        user_sessions[user_id] = vehicle
+    target_car = vehicle or user_sessions.get(user_id)
 
-    # ── Answer from manual ──
     if target_car:
         print(f"🔎 Searching manual: namespace={target_car}")
         answer = tech_agent.run(user_text, namespace=target_car)
 
         if "NO_ANSWER_FOUND" in answer:
             await update.message.reply_text(
-                "I checked the manual, but I couldn't find that specific detail. "
-                "Would you like to schedule an appointment to speak with a technician?"
+                "Hmm, I couldn't find that one in the manual. "
+                "Want me to set up a time for you to come in and talk to one of our techs?"
             )
         else:
-            vehicle_name = target_car.replace("-", " ").title()
-            await update.message.reply_text(
-                f"📖 {vehicle_name} Manual:\n\n{answer}\n\nNeed anything else about this vehicle?"
-            )
+            await update.message.reply_text(answer)
     else:
         await update.message.reply_text(
-            "I can help! Which vehicle is this for?\n"
-            "• Passport\n• Civic\n• Ridgeline\n\n"
-            "Just reply with the model name."
+            "Sure thing — which Honda are we talking about? Civic, Ridgeline, or Passport?"
         )
 
 
@@ -209,8 +206,8 @@ async def start_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True,
     )
     await update.message.reply_text(
-        "📅 Great! Let me help you schedule an appointment.\n\n"
-        "Please press the button below to share your number, or type it in manually.",
+        "Let's get you scheduled! "
+        "Can you share your phone number? You can tap the button below or just type it in.",
         reply_markup=keyboard,
     )
     return ASKING_PHONE
@@ -227,7 +224,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             digits = digits[-10:]
         phone = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
     else:
-        phone = router.extract_phone(update.message.text)
+        phone = orchestrator.extract_phone(update.message.text)
 
     if not phone:
         keyboard = ReplyKeyboardMarkup(
@@ -236,7 +233,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resize_keyboard=True,
         )
         await update.message.reply_text(
-            "I couldn't find a phone number. Please use the button or type it (e.g., 954-243-1238).",
+            "I didn't catch a phone number there — try tapping the button below or type it out like 954-243-1238.",
             reply_markup=keyboard,
         )
         return ASKING_PHONE
@@ -254,9 +251,8 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "_state": "ASKING_VEHICLE",
         })
         await update.message.reply_text(
-            f"👋 Welcome back, {customer['name']}!\n\n"
-            f"I see you last brought in your {customer['last_vehicle']}.\n"
-            f"Is this the vehicle you'd like to service today?",
+            f"Hey {customer['name'].title()}! Good to see you back. "
+            f"Last time you brought in your {customer['last_vehicle']} — same car this time?",
             reply_markup=ReplyKeyboardRemove(),
         )
         return ASKING_VEHICLE
@@ -265,7 +261,10 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["is_returning"] = False
     appointment_data[user_id]["_state"] = "CONFIRM_IDENTITY"
 
-    await update.message.reply_text("Thanks! What's your name?", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "Got it! I don't think we've met — what's your name?",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return CONFIRM_IDENTITY
 
 
@@ -276,9 +275,9 @@ async def confirm_identity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["is_returning"] = False
     appointment_data[user_id]["_state"] = "ASKING_VEHICLE"
 
+    name = update.message.text.strip().split()[0].title()
     await update.message.reply_text(
-        "Perfect! What vehicle will you be bringing in?\n"
-        "(e.g., '2024 Civic', 'Passport', '2022 Accord')"
+        f"Nice to meet you, {name}! What car are you bringing in?"
     )
     return ASKING_VEHICLE
 
@@ -288,7 +287,7 @@ async def get_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip().lower()
 
-    if appointment_data[user_id].get("is_returning") and user_text in ["yes", "yeah", "yep", "correct"]:
+    if appointment_data[user_id].get("is_returning") and user_text in ["yes", "yeah", "yep", "correct", "same", "yea", "ya", "si"]:
         customer = customer_db.search_by_phone(appointment_data[user_id]["phone"])
         appointment_data[user_id]["vehicle"] = customer["last_vehicle"]
     else:
@@ -297,11 +296,7 @@ async def get_vehicle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["_state"] = "ASKING_SERVICE"
 
     await update.message.reply_text(
-        "Thanks! What type of service do you need?\n\n"
-        "Examples:\n"
-        "• Oil change\n• Tire rotation\n• Brake inspection\n"
-        "• General maintenance\n• Diagnostic/Check engine light\n"
-        "• Recall service\n• Other (please describe)"
+        "Got it. What do you need done? Oil change, brakes, check engine light, recall — just let me know."
     )
     return ASKING_SERVICE
 
@@ -313,8 +308,7 @@ async def get_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["_state"] = "ASKING_DATE"
 
     await update.message.reply_text(
-        "Perfect! What date works best for you?\n"
-        "(e.g., 'Tomorrow', 'February 10', 'Next Monday')"
+        "When works best for you? You can say something like \"tomorrow\" or \"next Monday\" — whatever's easiest."
     )
     return ASKING_DATE
 
@@ -326,8 +320,7 @@ async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     appointment_data[user_id]["_state"] = "ASKING_TIME"
 
     await update.message.reply_text(
-        "Great! What time would you prefer?\n"
-        "(e.g., 'Morning', '10 AM', 'Afternoon', 'Anytime')"
+        "And what time? Morning, afternoon, or a specific time?"
     )
     return ASKING_TIME
 
@@ -347,20 +340,23 @@ async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_appointment(info)
     await notify_advisor(context, info)
 
-    # Confirmation message
+    # Confirmation — keep it conversational
+    name = info["name"].split()[0].title() if info.get("name") else "there"
+
     confirmation = (
-        "✅ Appointment request received!\n\n📋 Summary:\n"
-        f"• Name: {info['name']}\n"
-        f"• Phone: {info['phone']}\n"
-        f"• Vehicle: {info['vehicle']}\n"
-        f"• Service: {info['service_type']}\n"
-        f"• Date: {info['preferred_date']}\n"
-        f"• Time: {info['preferred_time']}\n"
+        f"Perfect, {name} — you're all set! Here's what I've got:\n\n"
+        f"🚗 {info['vehicle']}\n"
+        f"🔧 {info['service_type']}\n"
+        f"📅 {info['preferred_date']} — {info['preferred_time']}\n"
     )
+
     if info.get("is_returning"):
-        confirmation += f"\n👋 Thanks for coming back! (Visit #{info.get('visit_count', 0) + 1})"
-    confirmation += "\n\n🔔 Your service advisor will confirm your appointment shortly!"
-    confirmation += "\n\nIs there anything else I can help you with?"
+        confirmation += f"\nGlad to have you back! (Visit #{info.get('visit_count', 0) + 1})"
+
+    confirmation += (
+        "\n\nYour advisor will confirm everything shortly. "
+        "Anything else I can help with?"
+    )
 
     await update.message.reply_text(confirmation)
     del appointment_data[user_id]
@@ -372,8 +368,7 @@ async def cancel_appointment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     appointment_data.pop(user_id, None)
     await update.message.reply_text(
-        "❌ Appointment booking cancelled.\n\n"
-        "Type 'book appointment' anytime you're ready to schedule!"
+        "No worries, I cancelled that. Just let me know whenever you're ready to reschedule."
     )
     return ConversationHandler.END
 
@@ -387,7 +382,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"❌ Error: {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "Sorry, I encountered an error. Please try again or contact service directly."
+            "Sorry about that — something went wrong on my end. Try again, "
+            "or you can always call us directly at the service desk."
         )
 
 
@@ -438,6 +434,7 @@ def main():
     print(f"👥 Unique customers: {unique_count}")
     print(f"📅 Smart appointment scheduling: ENABLED")
     print(f"🔄 Returning customer detection: ENABLED")
+    print(f"🧠 Orchestrator: ENABLED (single-call routing)")
     if ADVISOR_TELEGRAM_ID:
         print(f"📧 Advisor notifications: ENABLED (ID: {ADVISOR_TELEGRAM_ID})")
     else:
