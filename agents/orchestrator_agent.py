@@ -33,16 +33,17 @@ Return ONLY valid JSON (no markdown, no backticks, no explanation):
     "intent": "<one of: tech, booking, escalation, greeting, vehicle_select>",
     "vehicle": "<one of: civic-2025, ridgeline-2025, passport-2026, or null>",
     "escalation": <true if angry/frustrated/asking for human, otherwise false>,
+    "language": "<detected language code, e.g.: en, es, pt, fr, ht, zh, etc.>",
     "summary": "<brief 5-10 word description of what the customer needs>"
 }}
 
 INTENT RULES:
-- "tech": Customer is asking a question about their vehicle (how-to, specs, warning lights, features, etc.)
+- "tech": Customer is asking a question about their vehicle (how-to, specs, warning lights, features, etc.). Also use for questions about what car is selected, what vehicle they're looking at, or anything car-related.
 - "booking": Customer wants to schedule, book, or make a service appointment. Keywords: book, schedule, appointment, oil change, maintenance, bring my car in, come in.
 - "escalation": Customer is angry, frustrated, swearing, or explicitly asking for a human/manager/person.
 - "greeting": Customer is just saying hello, thanks, or making small talk.
 - "vehicle_select": Customer's message is ONLY a vehicle name (e.g., just "Civic" or "Passport" by itself) — they're selecting which car to talk about.
-- "off_topic": Questions clearly unrelated to cars, service, or the dealership (e.g., cooking, jokes, coding, weather, politics).
+- "off_topic": Questions clearly unrelated to cars, service, or the dealership (e.g., cooking, jokes, coding, weather, politics). When in doubt, do NOT classify as off_topic — default to "tech" instead.
 
 VEHICLE RULES:
 - Set vehicle to the namespace string if they mention a specific Honda model.
@@ -52,6 +53,11 @@ VEHICLE RULES:
 ESCALATION RULES:
 - Set escalation to true if the customer is angry, using profanity, ALL CAPS shouting, or explicitly asking for a real person.
 - If escalation is true, still set intent to "escalation" (overrides other intents).
+
+LANGUAGE RULES:
+- Detect the language of the customer's message and return the ISO 639-1 code (e.g., "en", "es", "pt", "fr", "ht", "zh").
+- If the message contains a mix of languages, use the dominant one.
+- Common examples: English="en", Spanish="es", Portuguese="pt", French="fr", Haitian Creole="ht", Chinese="zh".
 """
 
 
@@ -110,6 +116,7 @@ class OrchestratorAgent:
         """
         Keyword-based classification — handles obvious cases without an LLM call.
         Returns None if unsure (triggers LLM path).
+        Note: language is set to None here — main.py uses the session's stored language.
         """
         user_lower = user_text.strip().lower()
 
@@ -119,41 +126,55 @@ class OrchestratorAgent:
                 "intent": "vehicle_select",
                 "vehicle": VEHICLE_NAMESPACES[user_lower],
                 "escalation": False,
+                "language": None,
                 "summary": f"Selected {user_lower}",
             }
 
-        # Booking: clear appointment keywords
+        # Booking: clear appointment keywords (English)
         booking_keywords = [
             "book appointment", "schedule service", "make an appointment",
             "schedule appointment", "book service", "need an appointment",
         ]
-        if any(kw in user_lower for kw in booking_keywords):
-            # Also check for vehicle mention
+        # Booking: clear appointment keywords (Spanish)
+        booking_keywords_es = [
+            "hacer una cita", "agendar cita", "necesito una cita",
+            "programar servicio", "reservar cita",
+        ]
+        if any(kw in user_lower for kw in booking_keywords + booking_keywords_es):
             vehicle = self._detect_vehicle_keyword(user_lower)
             return {
                 "intent": "booking",
                 "vehicle": vehicle,
                 "escalation": False,
+                "language": None,
                 "summary": "Wants to book appointment",
             }
 
-        # Greeting
-        greetings = ["hello", "hi", "hey", "thanks", "thank you", "good morning", "good afternoon"]
+        # Greeting (multilingual)
+        greetings = [
+            "hello", "hi", "hey", "thanks", "thank you", "good morning", "good afternoon",
+            "hola", "gracias", "buenos dias", "buenas tardes", "buenas noches",
+            "oi", "olá", "obrigado", "bom dia",
+        ]
         if user_lower in greetings:
             return {
                 "intent": "greeting",
                 "vehicle": None,
                 "escalation": False,
+                "language": None,
                 "summary": "Greeting",
             }
 
         # If vehicle is mentioned + it's clearly a question → tech
         vehicle = self._detect_vehicle_keyword(user_lower)
-        if vehicle and ("?" in user_text or any(w in user_lower for w in ["how", "what", "where", "why", "when", "does", "can", "is the"])):
+        question_words = ["how", "what", "where", "why", "when", "does", "can", "is the",
+                          "como", "que", "donde", "por que", "cuando", "puede", "cual"]
+        if vehicle and ("?" in user_text or any(w in user_lower for w in question_words)):
             return {
                 "intent": "tech",
                 "vehicle": vehicle,
                 "escalation": False,
+                "language": None,
                 "summary": "Technical question",
             }
 
@@ -175,6 +196,7 @@ class OrchestratorAgent:
         result.setdefault("intent", "tech")
         result.setdefault("vehicle", None)
         result.setdefault("escalation", False)
+        result.setdefault("language", "en")
         result.setdefault("summary", "")
 
         if result["intent"] not in valid_intents:
@@ -196,9 +218,9 @@ class OrchestratorAgent:
 
         booking_keywords = ["book", "schedule", "appointment", "oil change", "maintenance", "bring my car"]
         if any(kw in user_lower for kw in booking_keywords):
-            return {"intent": "booking", "vehicle": vehicle, "escalation": False, "summary": "Booking (fallback)"}
+            return {"intent": "booking", "vehicle": vehicle, "escalation": False, "language": "en", "summary": "Booking (fallback)"}
 
-        return {"intent": "tech", "vehicle": vehicle, "escalation": False, "summary": "General question (fallback)"}
+        return {"intent": "tech", "vehicle": vehicle, "escalation": False, "language": "en", "summary": "General question (fallback)"}
 
     # ─── Phone Extraction (kept from RouterAgent — not an LLM classification task) ──
 
