@@ -1,13 +1,19 @@
 """
-Customer Database — SQLite-based with VIN support.
+Customer Database — SQLite-based with VIN + Carfax status support.
 
 Each customer is identified by phone number and can have multiple vehicles.
-Each vehicle has a VIN, decoded info (year/model/trim), and Pinecone namespaces
-for both the owner's manual and Carfax data.
+Each vehicle has a VIN, decoded info (year/model/trim), Pinecone namespaces,
+and a carfax_status field to track ingestion state.
 
 Tables:
-  customers: id, phone, name, created_at
-  vehicles:  id, customer_id, vin, year, make, model, trim, manual_namespace, carfax_namespace, is_primary
+  customers: id, phone, name, telegram_id, created_at
+  vehicles:  id, customer_id, vin, year, make, model, trim,
+             manual_namespace, carfax_namespace, carfax_status, is_primary
+
+carfax_status values:
+  'none'     — No Carfax requested yet
+  'pending'  — Advisor has been notified, waiting for PDF
+  'ingested' — PDF has been chunked and uploaded to Pinecone
 """
 
 import sqlite3
@@ -50,6 +56,7 @@ def init_db():
             trim TEXT,
             manual_namespace TEXT,
             carfax_namespace TEXT,
+            carfax_status TEXT DEFAULT 'none',
             is_primary INTEGER DEFAULT 0,
             added_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (customer_id) REFERENCES customers(id)
@@ -58,6 +65,14 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
         CREATE INDEX IF NOT EXISTS idx_vehicles_vin ON vehicles(vin);
     """)
+
+    # Migration: add carfax_status column if it doesn't exist (for existing DBs)
+    try:
+        conn.execute("SELECT carfax_status FROM vehicles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE vehicles ADD COLUMN carfax_status TEXT DEFAULT 'none'")
+        print("   📦 Migrated: added carfax_status column to vehicles")
+
     conn.commit()
     conn.close()
     print("✅ Customer database initialized")
@@ -120,21 +135,19 @@ def decode_vin(vin: str) -> dict | None:
 def _map_to_manual_namespace(model: str, year: str) -> str | None:
     """
     Map a decoded model name to the Pinecone namespace for the owner's manual.
-    
-    Falls back to fuzzy matching (e.g., "Civic" -> "civic-2025").
     """
     model_lower = model.lower().strip()
 
-    # Direct match: check if model is in VEHICLE_NAMESPACES
+    # Direct match
     if model_lower in VEHICLE_NAMESPACES:
         return VEHICLE_NAMESPACES[model_lower]
 
-    # Try with year: e.g., "civic-2025"
+    # Try with year
     namespace_guess = f"{model_lower}-{year}"
     if namespace_guess in VEHICLE_NAMESPACES.values():
         return namespace_guess
 
-    # Fuzzy: check if any key is contained in the model
+    # Fuzzy match
     for key, namespace in VEHICLE_NAMESPACES.items():
         if key in model_lower or model_lower in key:
             return namespace
@@ -151,7 +164,6 @@ def _map_to_manual_namespace(model: str, year: str) -> str | None:
 def get_or_create_customer(phone: str, name: str = None, telegram_id: int = None) -> dict:
     """
     Find a customer by phone, or create a new one.
-    
     Returns dict: {id, phone, name, telegram_id, vehicles: [...]}
     """
     conn = _get_conn()
@@ -159,7 +171,6 @@ def get_or_create_customer(phone: str, name: str = None, telegram_id: int = None
 
     if row:
         customer_id = row["id"]
-        # Update telegram_id if provided and not set
         if telegram_id and not row["telegram_id"]:
             conn.execute("UPDATE customers SET telegram_id = ? WHERE id = ?", (telegram_id, customer_id))
             conn.commit()
@@ -174,7 +185,6 @@ def get_or_create_customer(phone: str, name: str = None, telegram_id: int = None
         customer_id = cursor.lastrowid
         conn.commit()
 
-    # Fetch vehicles
     vehicles = conn.execute(
         "SELECT * FROM vehicles WHERE customer_id = ? ORDER BY is_primary DESC, added_at DESC",
         (customer_id,),
@@ -194,13 +204,10 @@ def get_or_create_customer(phone: str, name: str = None, telegram_id: int = None
 def add_vehicle(phone: str, vin: str, is_primary: bool = False, decoded: dict = None) -> dict | None:
     """
     Add a vehicle to a customer's profile.
-    
-    If decoded info is not provided, will attempt NHTSA decode.
-    Returns the vehicle record or None if failed.
+    Sets carfax_status to 'pending' so we know to request the Carfax.
     """
     vin = vin.strip().upper()
 
-    # Decode if not provided
     if not decoded:
         decoded = decode_vin(vin)
     if not decoded:
@@ -208,7 +215,6 @@ def add_vehicle(phone: str, vin: str, is_primary: bool = False, decoded: dict = 
 
     conn = _get_conn()
 
-    # Make sure customer exists
     customer = conn.execute("SELECT id FROM customers WHERE phone = ?", (phone,)).fetchone()
     if not customer:
         conn.close()
@@ -236,10 +242,11 @@ def add_vehicle(phone: str, vin: str, is_primary: bool = False, decoded: dict = 
 
     cursor = conn.execute(
         """INSERT INTO vehicles (customer_id, vin, year, make, model, trim, 
-           manual_namespace, carfax_namespace, is_primary)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           manual_namespace, carfax_namespace, carfax_status, is_primary)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (customer_id, vin, decoded["year"], decoded["make"], decoded["model"],
-         decoded["trim"], decoded["manual_namespace"], carfax_namespace, int(is_primary)),
+         decoded["trim"], decoded["manual_namespace"], carfax_namespace,
+         "pending", int(is_primary)),
     )
 
     vehicle_id = cursor.lastrowid
@@ -323,6 +330,70 @@ def lookup_by_telegram_id(telegram_id: int) -> dict | None:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CARFAX STATUS MANAGEMENT
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def update_carfax_status(vin: str, status: str) -> bool:
+    """
+    Update the carfax_status for a vehicle.
+    
+    Args:
+        vin: Vehicle VIN
+        status: 'none', 'pending', or 'ingested'
+    """
+    if status not in ("none", "pending", "ingested"):
+        print(f"   ⚠️ Invalid carfax_status: {status}")
+        return False
+
+    conn = _get_conn()
+    result = conn.execute(
+        "UPDATE vehicles SET carfax_status = ? WHERE vin = ?",
+        (status, vin.strip().upper()),
+    )
+    conn.commit()
+    updated = result.rowcount > 0
+    conn.close()
+
+    if updated:
+        print(f"   ✅ Carfax status updated: {vin[:8]}... → {status}")
+    else:
+        print(f"   ⚠️ No vehicle found for VIN: {vin}")
+
+    return updated
+
+
+def get_vehicle_by_vin(vin: str) -> dict | None:
+    """Look up a vehicle by VIN."""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM vehicles WHERE vin = ?", (vin.strip().upper(),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_pending_carfax_vehicles() -> list[dict]:
+    """Get all vehicles waiting for Carfax ingestion."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT v.*, c.phone, c.name FROM vehicles v JOIN customers c ON v.customer_id = c.id WHERE v.carfax_status = 'pending'"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_customer_by_vehicle_vin(vin: str) -> dict | None:
+    """Find the customer who owns a specific VIN."""
+    conn = _get_conn()
+    row = conn.execute("""
+        SELECT c.* FROM customers c
+        JOIN vehicles v ON v.customer_id = c.id
+        WHERE v.vin = ?
+    """, (vin.strip().upper(),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CARFAX INGESTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -330,9 +401,7 @@ def lookup_by_telegram_id(telegram_id: int) -> dict | None:
 def ingest_carfax(pdf_path: str, vin: str) -> bool:
     """
     Ingest a Carfax PDF into Pinecone under the carfax-{VIN} namespace.
-    
-    Usage:
-        ingest_carfax("carfax_1HGCV1F34RA012345.pdf", "1HGCV1F34RA012345")
+    Updates carfax_status to 'ingested' on success.
     """
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -385,6 +454,9 @@ def ingest_carfax(pdf_path: str, vin: str) -> bool:
         index.upsert(vectors=vectors, namespace=namespace)
         total += len(batch)
         print(f"   ✅ Uploaded {total}/{len(documents)} chunks")
+
+    # Update status in DB
+    update_carfax_status(vin, "ingested")
 
     print(f"\n🎉 Carfax ingested! {total} chunks → '{namespace}'")
     return True
