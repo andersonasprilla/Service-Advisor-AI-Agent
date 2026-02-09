@@ -211,7 +211,7 @@ Bot: 👋 Welcome back, John! I see you last brought in your Civic 25...
 ```
 Customer: [Messages bot]
 Bot: 🔐 Please send the shop password to begin.
-Customer: HONDA2025
+Customer: Your Password
 Bot: ✅ Access Granted! Welcome to Rick Case Honda!
 ```
 
