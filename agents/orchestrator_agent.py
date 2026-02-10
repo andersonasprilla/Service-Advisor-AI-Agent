@@ -38,12 +38,19 @@ Return ONLY valid JSON (no markdown, no backticks, no explanation):
 }}
 
 INTENT RULES:
-- "tech": Customer is asking a question about their vehicle (how-to, specs, warning lights, features, etc.). Also use for questions about what car is selected, what vehicle they're looking at, or anything car-related.
-- "booking": Customer wants to schedule, book, or make a service appointment. Keywords: book, schedule, appointment, oil change, maintenance, bring my car in, come in.
+- "tech": Customer is asking a question about their vehicle (how-to, specs, warning lights, features, recalls, service history, etc.). Also use for questions about what car is selected, what vehicle they're looking at, or anything car-related. **CRITICAL: Questions ABOUT recalls (what is it, why, details, "de qué trata") are TECH questions, NOT booking.**
+- "booking": Customer wants to schedule, book, or make a service appointment. Keywords: book, schedule, appointment, oil change, maintenance, bring my car in, come in, make appointment for recall, schedule recall service. **CRITICAL: "What is the recall about" or "tell me about the recall" is NOT booking - that's TECH.**
 - "escalation": Customer is angry, frustrated, swearing, or explicitly asking for a human/manager/person.
 - "greeting": Customer is just saying hello, thanks, or making small talk.
 - "vehicle_select": Customer's message is ONLY a vehicle name (e.g., just "Civic" or "Passport" by itself) — they're selecting which car to talk about.
 - "off_topic": Questions clearly unrelated to cars, service, or the dealership (e.g., cooking, jokes, coding, weather, politics). When in doubt, do NOT classify as off_topic — default to "tech" instead.
+
+RECALL CLASSIFICATION EXAMPLES:
+- "De qué trata el recall?" → TECH (asking what it's about)
+- "What is the recall for?" → TECH (asking for information)
+- "Tell me about my recall" → TECH (wants details)
+- "I need to schedule the recall" → BOOKING (wants appointment)
+- "Book me for the recall service" → BOOKING (wants appointment)
 
 VEHICLE RULES:
 - Set vehicle to the namespace string if they mention a specific Honda model.
@@ -117,6 +124,8 @@ class OrchestratorAgent:
         Keyword-based classification — handles obvious cases without an LLM call.
         Returns None if unsure (triggers LLM path).
         Note: language is set to None here — main.py uses the session's stored language.
+        
+        CRITICAL: Recall questions (what/why/details) should be TECH, not booking.
         """
         user_lower = user_text.strip().lower()
 
@@ -130,15 +139,32 @@ class OrchestratorAgent:
                 "summary": f"Selected {user_lower}",
             }
 
+        # RECALL QUESTIONS → TECH (not booking)
+        recall_question_keywords = [
+            "what is the recall", "what's the recall", "de qué trata el recall",
+            "tell me about the recall", "recall about", "what recall", "cual es el recall",
+            "por qué recall", "why recall", "details about recall", "explain recall",
+        ]
+        if any(kw in user_lower for kw in recall_question_keywords):
+            vehicle = self._detect_vehicle_keyword(user_lower)
+            return {
+                "intent": "tech",
+                "vehicle": vehicle,
+                "escalation": False,
+                "language": None,
+                "summary": "Asking about recall details",
+            }
+
         # Booking: clear appointment keywords (English)
         booking_keywords = [
             "book appointment", "schedule service", "make an appointment",
             "schedule appointment", "book service", "need an appointment",
+            "schedule recall", "book recall", "make recall appointment",
         ]
         # Booking: clear appointment keywords (Spanish)
         booking_keywords_es = [
             "hacer una cita", "agendar cita", "necesito una cita",
-            "programar servicio", "reservar cita",
+            "programar servicio", "reservar cita", "agendar recall",
         ]
         if any(kw in user_lower for kw in booking_keywords + booking_keywords_es):
             vehicle = self._detect_vehicle_keyword(user_lower)
@@ -168,7 +194,7 @@ class OrchestratorAgent:
         # If vehicle is mentioned + it's clearly a question → tech
         vehicle = self._detect_vehicle_keyword(user_lower)
         question_words = ["how", "what", "where", "why", "when", "does", "can", "is the",
-                          "como", "que", "donde", "por que", "cuando", "puede", "cual"]
+                          "como", "que", "donde", "por que", "cuando", "puede", "cual", "de qué"]
         if vehicle and ("?" in user_text or any(w in user_lower for w in question_words)):
             return {
                 "intent": "tech",
