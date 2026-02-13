@@ -1,4 +1,4 @@
-# Rick Case Honda AI Service Agent
+# Dealer AI Service Agent
 
 An AI-powered Telegram bot that handles the busywork of being a service advisor — answering customer questions from the owner's manual, booking appointments through natural conversation, and recognizing returning customers automatically.
 
@@ -40,4 +40,4 @@ Service advisors spend hours every day answering the same questions ("How do I r
 
 ---
 
-*Rick Case Honda — Internal Use*
+Dealer — Internal Use*
